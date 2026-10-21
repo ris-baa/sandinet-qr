@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scan QR Voucher WiFi</title>
+<style>
+  :root {
+    --bg: #0f172a; --card: #1e293b; --text: #f1f5f9; --muted: #94a3b8;
+    --accent: #22c55e; --danger: #f87171; --border: #334155;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f1f5f9; --card: #ffffff; --text: #0f172a; --muted: #64748b; --accent: #16a34a; --danger: #dc2626; --border: #e2e8f0; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .card {
+    width: 100%; max-width: 420px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 20px;
+  }
+  h1 { font-size: 1.15rem; margin: 0 0 4px; }
+  p.sub { margin: 0 0 14px; color: var(--muted); font-size: .9rem; }
+  #viewer {
+    position: relative; width: 100%; aspect-ratio: 1 / 1; background: #000;
+    border-radius: 12px; overflow: hidden;
+  }
+  #reader { width: 100%; height: 100%; }
+  #reader video { object-fit: cover; }
+  #vid { width: 100%; height: 100%; object-fit: cover; display: none; }
+  #status { margin: 12px 0 0; min-height: 2.6em; font-size: .92rem; color: var(--muted); }
+  #status.ok { color: var(--accent); }
+  #status.err { color: var(--danger); }
+  .row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  button, .btn {
+    flex: 1 1 auto; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: transparent; color: var(--text); font-size: .95rem; cursor: pointer;
+    text-align: center; text-decoration: none;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; color: var(--muted); font-size: .88rem; }
+  form.manual { display: flex; gap: 8px; margin-top: 10px; }
+  form.manual input {
+    flex: 1; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--border);
+    background: transparent; color: var(--text); font-size: 1rem; min-width: 0;
+  }
+  .hint { margin-top: 12px; font-size: .8rem; color: var(--muted); line-height: 1.45; }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Scan QR Voucher</h1>
+  <p class="sub">Arahkan kamera ke QR code pada voucher WiFi Anda.</p>
+
+  <div id="viewer">
+    <div id="reader"></div>
+    <video id="vid" playsinline muted></video>
+  </div>
+  <p id="status">Menyiapkan kamera…</p>
+
+  <div class="row">
+    <button id="btnStart" class="primary" type="button">Mulai Kamera</button>
+    <a id="btnBack" class="btn" href="#">Kembali ke Login</a>
+  </div>
+
+  <details>
+    <summary>Kamera tidak bisa dipakai? Ketik kode voucher</summary>
+    <form class="manual" id="manualForm">
+      <input id="manualCode" type="text" inputmode="text" autocapitalize="off" autocomplete="off" placeholder="Kode voucher" required>
+      <button class="primary" type="submit">Masuk</button>
+    </form>
+  </details>
+
+  <p class="hint">Jika kamera diblokir, buka halaman ini di Chrome atau Safari (bukan jendela popup login WiFi), lalu izinkan akses kamera.</p>
+</main>
+
+<script>
+/* ================= PENGATURAN ================= */
+var CONFIG = {
+  // true  -> voucher berisi satu kode: username = password = kode itu
+  // false -> hanya username yang dikirim (password kosong)
+  samePassword: true,
+
+  // Alamat login router yang DIIZINKAN selain IP lokal (10.x, 172.16-31.x, 192.168.x).
+  // Contoh: ['hotspot.wifi', 'login.wifiku.net']
+  allowedHosts: [],
+
+  // Library QR: dicoba berurutan. Taruh file lokal di repo yang sama
+  // (paling andal karena tidak perlu CDN di walled garden).
+  libSources: [
+    'html5-qrcode.min.js',
+    'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js'
+  ]
+};
+/* =============================================== */
+
+var $ = function (id) { return document.getElementById(id); };
+var statusEl = $('status');
+var engine = null;      // 'lib' | 'native'
+var qr = null;          // instance html5-qrcode
+var stream = null;      // stream kamera (mode native)
+var scanning = false;
+var handled = false;
+
+function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || ''; }
+
+/* ---------- alamat login router ---------- */
+function getLoginUrl() {
+  var p = new URLSearchParams(location.search).get('login');
+  try {
+    if (p) { sessionStorage.setItem('hs_login', p); localStorage.setItem('hs_login', p); }
+    else { p = sessionStorage.getItem('hs_login') || localStorage.getItem('hs_login'); }
+  } catch (e) {}
+  return p || '';
+}
+
+function isAllowedLogin(u) {
+  var url;
+  try { url = new URL(u); } catch (e) { return false; }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  var h = url.hostname.toLowerCase();
+  if (CONFIG.allowedHosts.indexOf(h) !== -1) return true;
+  var m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return false;
+  var a = +m[1], b = +m[2];
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+var loginUrl = getLoginUrl();
+$('btnBack').href = loginUrl && isAllowedLogin(loginUrl) ? loginUrl : '#';
+
+/* ---------- baca isi QR ---------- */
+function parseVoucher(text) {
+  text = (text || '').trim();
+  if (!text) return null;
+  var url = null;
+  try { url = new URL(text); } catch (e) {}
+  if (url && /^https?:$/.test(url.protocol)) {
+    var q = url.searchParams;
+    var user = q.get('username') || q.get('user') || q.get('code');
+    var pass = q.get('password') || q.get('pass');
+    if (!user) return null; // QR berisi link biasa, bukan voucher
+    return { user: user, pass: pass != null ? pass : (CONFIG.samePassword ? user : '') };
+  }
+  var m = text.match(/^([^\s:|,;]+)[:|,;]([^\s]+)$/); // user:pass
+  if (m) return { user: m[1], pass: m[2] };
+  if (/\s/.test(text)) return null;
+  return { user: text, pass: CONFIG.samePassword ? text : '' };
+}
+
+function submitVoucher(text) {
+  if (handled) return;
+  var v = parseVoucher(text);
+  if (!v) { setStatus('QR tidak dikenali sebagai voucher. Coba lagi.', 'err'); return false; }
+  if (!loginUrl || !isAllowedLogin(loginUrl)) {
+    setStatus('Alamat login router tidak valid. Kembali ke halaman login WiFi lalu tekan tombol Scan QR lagi.', 'err');
+    return false;
+  }
+  handled = true;
+  stopCamera();
+  setStatus('Voucher terbaca. Mengarahkan ke halaman login…', 'ok');
+  var sep = loginUrl.indexOf('?') === -1 ? '?' : '&';
+  location.href = loginUrl + sep + 'qr_user=' + encodeURIComponent(v.user) + '&qr_pass=' + encodeURIComponent(v.pass);
+  return true;
+}
+
+/* ---------- kamera ---------- */
+function loadScript(src) {
+  return new Promise(function (resolve, reject) {
+    var s = document.createElement('script');
+    s.src = src; s.onload = resolve; s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+async function ensureLib() {
+  if (window.Html5Qrcode) return true;
+  for (var i = 0; i < CONFIG.libSources.length; i++) {
+    try { await loadScript(CONFIG.libSources[i]); if (window.Html5Qrcode) return true; } catch (e) {}
+  }
+  return false;
+}
+
+function cameraError(e) {
+  var name = e && (e.name || e.message || String(e));
+  if (/NotAllowed|Permission/i.test(name)) {
+    setStatus('Akses kamera ditolak. Izinkan kamera di browser, atau buka halaman ini di Chrome/Safari.', 'err');
+  } else if (/NotFound|Devices/i.test(name)) {
+    setStatus('Kamera tidak ditemukan di perangkat ini.', 'err');
+  } else if (!window.isSecureContext) {
+    setStatus('Kamera hanya bisa dipakai lewat HTTPS.', 'err');
+  } else {
+    setStatus('Kamera gagal dibuka: ' + name, 'err');
+  }
+  $('btnStart').textContent = 'Coba Lagi';
+  $('btnStart').style.display = '';
+}
+
+async function startCamera() {
+  if (scanning) return;
+  handled = false;
+  setStatus('Membuka kamera…');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return cameraError(new Error('Browser tidak mendukung kamera'));
+  }
+
+  var hasLib = await ensureLib();
+  try {
+    if (hasLib) {
+      engine = 'lib';
+      $('vid').style.display = 'none';
+      $('reader').style.display = '';
+      qr = new Html5Qrcode('reader');
+      await qr.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: function (w, h) { var s = Math.floor(Math.min(w, h) * 0.7); return { width: s, height: s }; } },
+        function (text) { submitVoucher(text); },
+        function () {}
+      );
+    } else if ('BarcodeDetector' in window) {
+      engine = 'native';
+      $('reader').style.display = 'none';
+      $('vid').style.display = 'block';
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+      var vid = $('vid');
+      vid.srcObject = stream;
+      await vid.play();
+      var detector = new BarcodeDetector({ formats: ['qr_code'] });
+      (async function loop() {
+        if (!scanning) return;
+        try {
+          var codes = await detector.detect(vid);
+          if (codes.length && submitVoucher(codes[0].rawValue)) return;
+        } catch (e) {}
+        setTimeout(loop, 200);
+      })();
+    } else {
+      return setStatus('Library scanner gagal dimuat dan browser tidak mendukung scan langsung. Gunakan input kode manual di bawah.', 'err');
+    }
+    scanning = true;
+    $('btnStart').style.display = 'none';
+    setStatus('Arahkan kamera ke QR code voucher.');
+  } catch (e) {
+    scanning = false;
+    cameraError(e);
+  }
+}
+
+async function stopCamera() {
+  scanning = false;
+  try { if (qr) { await qr.stop(); qr.clear(); } } catch (e) {}
+  if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+}
+
+/* ---------- event ---------- */
+$('btnStart').addEventListener('click', startCamera);
+$('manualForm').addEventListener('submit', function (e) {
+  e.preventDefault();
+  submitVoucher($('manualCode').value);
+});
+window.addEventListener('pagehide', stopCamera);
+
+// Kamera langsung dibuka begitu halaman terbuka
+startCamera();
+</script>
+</body>
+</html>
