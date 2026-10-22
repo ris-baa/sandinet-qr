@@ -164,7 +164,7 @@ function submitVoucher(text) {
   stopCamera();
   setStatus('Voucher terbaca. Mengarahkan ke halaman login…', 'ok');
   var sep = loginUrl.indexOf('?') === -1 ? '?' : '&';
-  location.href = loginUrl + sep + 'qr_user=' + encodeURIComponent(v.user) + '&qr_pass=' + encodeURIComponent(v.pass);
+  location.href = loginUrl + sep + 'username=' + encodeURIComponent(v.user) + '&password=' + encodeURIComponent(v.pass);
   return true;
 }
 
