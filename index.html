@@ -40,7 +40,7 @@
     background: transparent; color: var(--text); font-size: .95rem; cursor: pointer;
     text-align: center; text-decoration: none;
   }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary, .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   details { margin-top: 14px; }
   summary { cursor: pointer; color: var(--muted); font-size: .88rem; }
   form.manual { display: flex; gap: 8px; margin-top: 10px; }
@@ -67,6 +67,20 @@
     <a id="btnBack" class="btn" href="#">Kembali ke Login</a>
   </div>
 
+  <div id="fallback" style="display:none">
+    <p class="hint" style="margin-top:14px">Kamera diblokir oleh jendela popup login WiFi. Pilih salah satu cara ini:</p>
+    <div class="row">
+      <a id="btnChrome" class="btn primary" style="display:none" href="#">Buka di Chrome</a>
+      <label class="btn" for="photo">Scan dari foto QR</label>
+      <input id="photo" type="file" accept="image/*" capture="environment" style="display:none">
+    </div>
+    <p class="hint">iPhone / cara lain: salin link di bawah, lalu tempel di Safari atau Chrome.</p>
+    <form class="manual" onsubmit="return false">
+      <input id="linkBox" type="text" readonly>
+      <button id="btnCopy" type="button">Salin</button>
+    </form>
+  </div>
+
   <details>
     <summary>Kamera tidak bisa dipakai? Ketik kode voucher</summary>
     <form class="manual" id="manualForm">
@@ -81,13 +95,15 @@
 <script>
 /* ================= PENGATURAN ================= */
 var CONFIG = {
-  // true  -> voucher berisi satu kode: username = password = kode itu
+  // Berlaku hanya jika QR berisi SATU kode saja:
+  // true  -> username = password = kode itu
   // false -> hanya username yang dikirim (password kosong)
-  samePassword: true,
+  // (QR berisi username dan password terpisah tidak terpengaruh)
+  samePassword: false,
 
   // Alamat login router yang DIIZINKAN selain IP lokal (10.x, 172.16-31.x, 192.168.x).
   // Contoh: ['hotspot.wifi', 'login.wifiku.net']
-  allowedHosts: ['sandinet.net','risfan.net'],
+  allowedHosts: ['sandinet.net', 'risfan.net'],
 
   // Library QR: dicoba berurutan. Taruh file lokal di repo yang sama
   // (paling andal karena tidak perlu CDN di walled garden).
@@ -148,7 +164,9 @@ function parseVoucher(text) {
   }
   var m = text.match(/^([^\s:|,;]+)[:|,;]([^\s]+)$/); // user:pass
   if (m) return { user: m[1], pass: m[2] };
-  if (/\s/.test(text)) return null;
+  var parts = text.split(/\s+/); // dua baris / dipisah spasi: username lalu password
+  if (parts.length === 2) return { user: parts[0], pass: parts[1] };
+  if (parts.length > 2) return null;
   return { user: text, pass: CONFIG.samePassword ? text : '' };
 }
 
@@ -196,6 +214,7 @@ function cameraError(e) {
   } else {
     setStatus('Kamera gagal dibuka: ' + name, 'err');
   }
+  showFallback();
   $('btnStart').textContent = 'Coba Lagi';
   $('btnStart').style.display = '';
 }
@@ -239,6 +258,7 @@ async function startCamera() {
         setTimeout(loop, 200);
       })();
     } else {
+      showFallback();
       return setStatus('Library scanner gagal dimuat dan browser tidak mendukung scan langsung. Gunakan input kode manual di bawah.', 'err');
     }
     scanning = true;
@@ -255,6 +275,51 @@ async function stopCamera() {
   try { if (qr) { await qr.stop(); qr.clear(); } } catch (e) {}
   if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
 }
+
+/* ---------- jalur cadangan (kamera diblokir popup login) ---------- */
+function showFallback() {
+  $('fallback').style.display = '';
+  $('linkBox').value = location.href;
+  if (/Android/i.test(navigator.userAgent)) {
+    // Coba buka halaman yang sama di Chrome (di luar popup login)
+    $('btnChrome').href = 'intent://' + location.host + location.pathname + location.search +
+      '#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=' +
+      encodeURIComponent(location.href) + ';end';
+    $('btnChrome').style.display = '';
+  }
+}
+
+$('btnCopy').addEventListener('click', function () {
+  var box = $('linkBox');
+  box.focus(); box.select(); box.setSelectionRange(0, 99999);
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(box.value);
+    else document.execCommand('copy');
+    $('btnCopy').textContent = 'Tersalin';
+  } catch (e) { $('btnCopy').textContent = 'Tekan lama lalu salin'; }
+});
+
+// Scan dari foto QR (tidak membutuhkan akses kamera langsung)
+$('photo').addEventListener('change', async function (e) {
+  var f = e.target.files && e.target.files[0];
+  if (!f) return;
+  setStatus('Membaca foto…');
+  var text = null;
+  try {
+    if (await ensureLib()) {
+      var h = new Html5Qrcode('reader');
+      text = await h.scanFile(f, false);
+      try { h.clear(); } catch (x) {}
+    } else if ('BarcodeDetector' in window) {
+      var bmp = await createImageBitmap(f);
+      var codes = await new BarcodeDetector({ formats: ['qr_code'] }).detect(bmp);
+      if (codes.length) text = codes[0].rawValue;
+    }
+  } catch (err) { text = null; }
+  e.target.value = '';
+  if (!text) return setStatus('QR pada foto tidak terbaca. Coba foto lebih dekat dan jelas.', 'err');
+  submitVoucher(text);
+});
 
 /* ---------- event ---------- */
 $('btnStart').addEventListener('click', startCamera);
